@@ -127,7 +127,216 @@ BEGIN
 END;
 
 
+
+--------------------------------------------------------------------
+--------------Testing the Stored Procedure--------------------------
+--------------------------------------------------------------------
+
+-- Test the stored procedure with a sample SalesOrderID and ProductID
+-- Before running the procedure, ensure you have a valid SalesOrderID and ProductID 
+
+-- Get a sample SalesOrderID
+SELECT TOP 5 SalesOrderID FROM Sales.SalesOrderHeader ORDER BY SalesOrderID DESC;
+
+-- Check a valid ProductID that has a price and offer
+SELECT TOP 5 ProductID FROM Sales.SalesOrderDetail ORDER BY SalesOrderDetailID DESC;
+
+-- Check if there's a special offer for a product
+SELECT TOP 5 * FROM Sales.SpecialOfferProduct;
+
+-- Check inventory
+SELECT TOP 5 * FROM Production.ProductInventory ORDER BY Quantity DESC;
+EXEC sp_InsertOrderDetails
+    @SalesOrderID = 43659,  -- Replace with your real SalesOrderID
+    @ProductID = 776,
+    @Quantity = 1;
+
+
+SELECT Quantity FROM Production.ProductInventory
+WHERE ProductID = 776;
+
+
+
+--- Clean up: Drop the stored procedure after testing
 DROP PROCEDURE sp_InsertOrderDetails;
 
 
 
+---------------------------------------------------------------------
+---------------------------query 2-----------------------------------
+---------------------------------------------------------------------
+
+CREATE PROCEDURE sp_UpdateOrderDetails
+    @OrderID INT,
+    @ProductID INT,
+    @UnitPrice MONEY = NULL,
+    @Quantity INT = NULL,
+    @Discount MONEY = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Store original values for conditional update and inventory adjustment
+    DECLARE @OldQuantity INT;
+
+    -- Get the current quantity for this order detail
+    SELECT @OldQuantity = OrderQty
+    FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+    -- Update the order detail, only changing values that are not NULL
+    UPDATE Sales.SalesOrderDetail
+    SET
+        UnitPrice = ISNULL(@UnitPrice, UnitPrice),
+        OrderQty = ISNULL(@Quantity, OrderQty),
+        UnitPriceDiscount = ISNULL(@Discount, UnitPriceDiscount)
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+    -- If quantity changed, update inventory accordingly
+    IF @Quantity IS NOT NULL AND @OldQuantity IS NOT NULL
+    BEGIN
+        DECLARE @QuantityDiff INT = @OldQuantity - @Quantity;
+        UPDATE Production.ProductInventory
+        SET Quantity = Quantity + @QuantityDiff
+        WHERE ProductID = @ProductID;
+    END
+
+    PRINT 'Order detail updated successfully.';
+END;
+
+---------------------------------------------------------------------
+-- Testing the sp_UpdateOrderDetails stored procedure-------------------
+---------------------------------------------------------------------
+
+
+-- Pick an existing SalesOrderID and ProductID from your data
+DECLARE @OrderID INT = (SELECT TOP 1 SalesOrderID FROM Sales.SalesOrderDetail);
+DECLARE @ProductID INT = (SELECT TOP 1 ProductID FROM Sales.SalesOrderDetail WHERE SalesOrderID = @OrderID);
+
+-- Show the current values BEFORE the update
+SELECT 
+    SalesOrderID, ProductID, UnitPrice, OrderQty, UnitPriceDiscount
+FROM Sales.SalesOrderDetail
+WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+-- Start a transaction so we can roll back the change after testing
+BEGIN TRANSACTION;
+
+-- Run the stored procedure to update the UnitPrice
+EXEC sp_UpdateOrderDetails
+    @OrderID = @OrderID,
+    @ProductID = @ProductID,
+    @UnitPrice = 99.99;  -- Set a test price
+
+-- Show the new values AFTER the update
+SELECT 
+    SalesOrderID, ProductID, UnitPrice, OrderQty, UnitPriceDiscount
+FROM Sales.SalesOrderDetail
+WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+-- Undo the test change (so your data is not altered)
+ROLLBACK TRANSACTION;
+
+
+-- Clean up: Drop the stored procedure after testing
+DROP PROCEDURE sp_UpdateOrderDetails;
+
+---------------------------------------------------------------------
+---------------------------query 3-----------------------------------
+---------------------------------------------------------------------
+
+
+CREATE PROCEDURE sp_GetOrderDetails
+    @OrderID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Select all records for the given OrderID
+    SELECT *
+    FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID;
+
+    -- If no records found, print message and return 1
+    IF @@ROWCOUNT = 0
+    BEGIN
+        PRINT 'The OrderID ' + CAST(@OrderID AS VARCHAR(20)) + ' does not exits';
+        RETURN 1;
+    END
+END;
+
+----------------------------------------------------------------------
+-- Testing the sp_GetOrderDetails stored procedure
+----------------------------------------------------------------------
+-- Test 1: Existing OrderID (should return rows)
+DECLARE @ExistingOrderID INT = (SELECT TOP 1 SalesOrderID FROM Sales.SalesOrderDetail);
+
+PRINT '--- Test 1: Existing OrderID ---';
+EXEC sp_GetOrderDetails @OrderID = @ExistingOrderID;
+PRINT '-------------------------------';
+
+-- Test 2: Non-existing OrderID (should print message and return 1)
+PRINT '--- Test 2: Non-existing OrderID ---';
+EXEC sp_GetOrderDetails @OrderID = -99999;  -- Assumed not to exist
+PRINT '------------------------------------';
+
+-- Clean up: Drop the stored procedure after testing
+DROP PROCEDURE sp_GetOrderDetails;
+
+
+---------------------------------------------------------------------
+---------------------------query 4-----------------------------------
+---------------------------------------------------------------------
+
+CREATE PROCEDURE DeleteOrderDetails
+    @OrderID INT,
+    @ProductID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Validate that the OrderID and ProductID combination exists
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM Sales.SalesOrderDetail
+        WHERE SalesOrderID = @OrderID AND ProductID = @ProductID
+    )
+    BEGIN
+        PRINT 'Invalid parameters: Either the OrderID does not exist or the ProductID is not part of this order.';
+        RETURN -1;
+    END
+
+    -- Delete the order detail row
+    DELETE FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+    PRINT 'Order detail deleted successfully.';
+END;
+
+----------------------------------------------------------------------
+-- Testing the DeleteOrderDetails stored procedure
+----------------------------------------------------------------------
+-- Test 1: Valid OrderID and ProductID (should delete one row)
+DECLARE @OrderID INT = (SELECT TOP 1 SalesOrderID FROM Sales.SalesOrderDetail);
+DECLARE @ProductID INT = (SELECT TOP 1 ProductID FROM Sales.SalesOrderDetail WHERE SalesOrderID = @OrderID);
+
+PRINT '--- Test 1: Valid parameters ---';
+-- Show the row before deletion
+SELECT * FROM Sales.SalesOrderDetail WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+-- Execute the procedure (expect success)
+EXEC DeleteOrderDetails @OrderID = @OrderID, @ProductID = @ProductID;
+
+-- Show the row after deletion (should be gone)
+SELECT * FROM Sales.SalesOrderDetail WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+PRINT '-------------------------------';
+
+-- Test 2: Invalid OrderID or ProductID (should print error and return -1)
+PRINT '--- Test 2: Invalid parameters ---';
+EXEC DeleteOrderDetails @OrderID = -1, @ProductID = -1;  -- Assumed invalid
+PRINT '----------------------------------';
+-- Clean up: Drop the stored procedure after testing
+DROP PROCEDURE DeleteOrderDetails;
+---------------------------------------------------------------------
+---------------------------query 5-----------------------------------
+---------------------------------------------------------------------
